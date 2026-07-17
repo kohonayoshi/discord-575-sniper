@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from .finder import SENRYU_PATTERN, can_start_part
+from .finder import SENRYU_PATTERN, can_start_part, has_unknown_mora_word
 from .mora import total_mora
 from .tokenizer import Morpheme
 
@@ -17,6 +17,7 @@ class ChainEntry:
     """チェーンに保持する1件分のメッセージ情報。"""
 
     text: str
+    """mora=0(記号・空白)の形態素を除いた表層文字列。メッセージ全文そのものではない。"""
     user_id: int
     message_id: int
     mora: int
@@ -87,7 +88,7 @@ class ChainTracker:
             user_id: メッセージ投稿者の ID。
             message_id: メッセージの ID。
             text: サニタイズ済みのメッセージ本文。
-            morphemes: text を形態素解析した結果。総モーラ数の算出と、先頭形態素が付属語(助詞・助動詞など)でないかの判定(can_start_part())に使う。
+            morphemes: text を形態素解析した結果。総モーラ数の算出、先頭形態素が付属語(助詞・助動詞など)でないかの判定(can_start_part())、および未知語(非記号品詞の mora=0 形態素)を含まないかの判定(has_unknown_mora_word())に使う。
             now: 現在時刻を表す単調増加する秒数(例: time.monotonic())。
                 呼び出し側から注入することでテスト時に任意の時刻を扱える。
 
@@ -98,14 +99,27 @@ class ChainTracker:
         if chain and (now - chain[-1].timestamp) > CHAIN_TIMEOUT_SECONDS:
             chain = []
 
-        mora = total_mora(morphemes)
-        if mora not in (5, 7) or not can_start_part(morphemes[0]):
+        # can_start_part() は morphemes[0] にアクセスするため、空リストの場合は
+        # モーラ数チェックより先に弾く(添付ファイルのみ等でサニタイズ後に
+        # 空文字列になったメッセージでは morphemes が空リストになり得る)。
+        if not morphemes:
             self._store(channel_id, [])
             return None
 
+        mora = total_mora(morphemes)
+        is_valid_mora = mora in (5, 7)
+        starts_valid_part = can_start_part(morphemes[0])
+        has_unknown_word = has_unknown_mora_word(morphemes)
+        if not is_valid_mora or not starts_valid_part or has_unknown_word:
+            self._store(channel_id, [])
+            return None
+
+        # has_unknown_mora_word() のチェックを通過済みのため、ここで残る
+        # mora=0 形態素は記号・空白品詞のみであることが保証されている。
+        filtered_text = "".join(m.surface for m in morphemes if m.mora > 0)
         chain = chain + [
             ChainEntry(
-                text=text, user_id=user_id, message_id=message_id,
+                text=filtered_text, user_id=user_id, message_id=message_id,
                 mora=mora, timestamp=now,
             )
         ]
