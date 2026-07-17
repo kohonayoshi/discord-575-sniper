@@ -120,6 +120,34 @@ async def handle_status(config_store: ConfigStore, channel_id: int, parent_id: i
     return f"このチャンネルの川柳検出は現在「{state}」です。"
 
 
+_REMIX_PARTS: tuple[tuple[str, bool], ...] = (
+    ("part1", False),
+    ("part2", False),
+    ("part3", False),
+    ("part4", True),
+    ("part5", True),
+)
+
+
+async def handle_remix(record_store: RecordStore, channel_id: int) -> str:
+    """このチャンネルの過去記録からランダムに5句を選び、新しい短歌を合成した
+    返信メッセージを組み立てる。素材が足りない場合はエラーメッセージを返す。
+    """
+    picks: list[tuple[str, int]] = []
+    for column, require_tanka in _REMIX_PARTS:
+        pick = await asyncio.to_thread(
+            record_store.pick_random_part,
+            channel_id=channel_id,
+            column=column,
+            require_tanka=require_tanka,
+        )
+        if pick is None:
+            return "このチャンネルには短歌を合成するための素材が足りません。"
+        picks.append(pick)
+    lines = "\n".join(f"> {text} (<@{user_id}>)" for text, user_id in picks)
+    return f"🎋 過去の記録から短歌を合成しました！\n{lines}"
+
+
 def create_bot(
     guild_id: int,
     config_store: ConfigStore,
@@ -302,6 +330,24 @@ def create_bot(
             )
             return
         await interaction.response.send_message(message, ephemeral=True)
+
+    @senryu_group.command(name="remix", description="過去の記録からランダムに新しい短歌を合成します")
+    async def remix(interaction: discord.Interaction):
+        """`/senryu remix` コマンドを処理し、合成した短歌を返信する。"""
+        if interaction.channel_id is None:
+            await interaction.response.send_message(
+                "このコマンドはチャンネル内でのみ使用できます。", ephemeral=True
+            )
+            return
+        try:
+            message = await handle_remix(record_store, interaction.channel_id)
+        except Exception:
+            logger.exception("短歌の合成に失敗しました。")
+            await interaction.response.send_message(
+                "短歌の合成に失敗しました。時間を置いて再度お試しください。", ephemeral=True
+            )
+            return
+        await interaction.response.send_message(message)
 
     @tree.error
     async def on_tree_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
